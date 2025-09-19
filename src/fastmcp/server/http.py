@@ -18,6 +18,7 @@ from starlette.routing import BaseRoute, Mount, Route
 from starlette.types import Lifespan, Receive, Scope, Send
 
 from fastmcp.server.auth import AuthProvider
+from fastmcp.server.auth.providers.azure import AzureProvider
 from fastmcp.utilities.logging import get_logger
 
 if TYPE_CHECKING:
@@ -176,13 +177,21 @@ def create_sse_app(
         server_routes.extend(auth_routes)
         server_middleware.extend(auth_middleware)
 
+        required_scopes = getattr(auth, "required_scopes", None) or []
+        if isinstance(auth, AzureProvider):
+            # TODO: This is a hack to remove `api://<client_id>/` prefix from scopes, since that's not included in the token
+            #  when using Azure AD.
+            required_scopes = [
+                s.split("/", 3)[-1] if s.startswith("api://") else s
+                for s in auth.required_scopes
+            ]
         # Manually wrap the SSE message endpoint with RequireAuthMiddleware
         server_routes.append(
             Mount(
                 message_path,
                 app=RequireAuthMiddleware(
                     sse.handle_post_message,
-                    auth.required_scopes,
+                    required_scopes,
                     auth._get_resource_url("/.well-known/oauth-protected-resource"),
                 ),
             )

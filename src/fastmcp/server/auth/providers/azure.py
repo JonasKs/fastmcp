@@ -6,11 +6,10 @@ using the OAuth Proxy pattern for non-DCR OAuth flows.
 
 from __future__ import annotations
 
-import httpx
 from pydantic import SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from fastmcp.server.auth import AccessToken, TokenVerifier
+from fastmcp.server.auth import JWTVerifier
 from fastmcp.server.auth.oauth_proxy import OAuthProxy
 from fastmcp.utilities.auth import parse_scopes
 from fastmcp.utilities.logging import get_logger
@@ -31,7 +30,7 @@ class AzureProviderSettings(BaseSettings):
     client_id: str | None = None
     client_secret: SecretStr | None = None
     tenant_id: str | None = None
-    base_url: str | None = None
+    base_url: str = "http://localhost:8000"
     redirect_path: str | None = None
     required_scopes: list[str] | None = None
     timeout_seconds: int | None = None
@@ -41,77 +40,6 @@ class AzureProviderSettings(BaseSettings):
     @classmethod
     def _parse_scopes(cls, v):
         return parse_scopes(v)
-
-
-class AzureTokenVerifier(TokenVerifier):
-    """Token verifier for Azure OAuth tokens.
-
-    Azure tokens are JWTs, but we verify them by calling the Microsoft Graph API
-    to get user information and validate the token.
-    """
-
-    def __init__(
-        self,
-        *,
-        required_scopes: list[str] | None = None,
-        timeout_seconds: int = 10,
-    ):
-        """Initialize the Azure token verifier.
-
-        Args:
-            required_scopes: Required OAuth scopes
-            timeout_seconds: HTTP request timeout
-        """
-        super().__init__(required_scopes=required_scopes)
-        self.timeout_seconds = timeout_seconds
-
-    async def verify_token(self, token: str) -> AccessToken | None:
-        """Verify Azure OAuth token by calling Microsoft Graph API."""
-        try:
-            async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
-                # Use Microsoft Graph API to validate token and get user info
-                response = await client.get(
-                    "https://graph.microsoft.com/v1.0/me",
-                    headers={
-                        "Authorization": f"Bearer {token}",
-                        "User-Agent": "FastMCP-Azure-OAuth",
-                    },
-                )
-
-                if response.status_code != 200:
-                    logger.debug(
-                        "Azure token verification failed: %d - %s",
-                        response.status_code,
-                        response.text[:200],
-                    )
-                    return None
-
-                user_data = response.json()
-
-                # Create AccessToken with Azure user info
-                return AccessToken(
-                    token=token,
-                    client_id=str(user_data.get("id", "unknown")),
-                    scopes=self.required_scopes or [],
-                    expires_at=None,
-                    claims={
-                        "sub": user_data.get("id"),
-                        "email": user_data.get("mail")
-                        or user_data.get("userPrincipalName"),
-                        "name": user_data.get("displayName"),
-                        "given_name": user_data.get("givenName"),
-                        "family_name": user_data.get("surname"),
-                        "job_title": user_data.get("jobTitle"),
-                        "office_location": user_data.get("officeLocation"),
-                    },
-                )
-
-        except httpx.RequestError as e:
-            logger.debug("Failed to verify Azure token: %s", e)
-            return None
-        except Exception as e:
-            logger.debug("Azure token verification error: %s", e)
-            return None
 
 
 class AzureProvider(OAuthProxy):
@@ -227,9 +155,11 @@ class AzureProvider(OAuthProxy):
         )
 
         # Create Azure token verifier
-        token_verifier = AzureTokenVerifier(
-            required_scopes=scopes_final,
-            timeout_seconds=timeout_seconds_final,
+        token_verifier = JWTVerifier(
+            issuer=f"https://login.microsoftonline.com/{tenant_id_final}/v2.0",
+            audience=settings.client_id,
+            required_scopes=required_scopes,
+            jwks_uri=f"https://login.microsoftonline.com/{tenant_id_final}/discovery/v2.0/keys",
         )
 
         # Build Azure OAuth endpoints with tenant
