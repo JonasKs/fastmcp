@@ -228,3 +228,83 @@ class TestJWTIssuer:
 
         with pytest.raises(JoseError):
             issuer.verify_token("header.payload")  # Missing signature
+
+    def test_issue_access_token_with_upstream_claims(self, issuer):
+        """Test that upstream_claims are embedded in the access token."""
+        upstream_claims = {
+            "sub": "user-subject-id",
+            "oid": "user-object-id",
+            "name": "Test User",
+            "email": "test@example.com",
+            "roles": ["Admin", "Reader"],
+        }
+
+        token = issuer.issue_access_token(
+            client_id="client-abc",
+            scopes=["read", "write"],
+            jti="token-id-123",
+            expires_in=3600,
+            upstream_claims=upstream_claims,
+        )
+
+        payload = issuer.verify_token(token)
+        # Standard claims should still be present
+        assert payload["client_id"] == "client-abc"
+        assert payload["scope"] == "read write"
+        assert payload["jti"] == "token-id-123"
+
+        # Upstream claims should be nested under "upstream_claims"
+        assert "upstream_claims" in payload
+        assert payload["upstream_claims"]["sub"] == "user-subject-id"
+        assert payload["upstream_claims"]["oid"] == "user-object-id"
+        assert payload["upstream_claims"]["name"] == "Test User"
+        assert payload["upstream_claims"]["email"] == "test@example.com"
+        assert payload["upstream_claims"]["roles"] == ["Admin", "Reader"]
+
+    def test_issue_access_token_without_upstream_claims(self, issuer):
+        """Test that tokens without upstream_claims don't have the key."""
+        token = issuer.issue_access_token(
+            client_id="client-abc",
+            scopes=["read"],
+            jti="token-id-123",
+            expires_in=3600,
+            upstream_claims=None,
+        )
+
+        payload = issuer.verify_token(token)
+        assert "upstream_claims" not in payload
+
+    def test_issue_refresh_token_with_upstream_claims(self, issuer):
+        """Test that upstream_claims are embedded in the refresh token."""
+        upstream_claims = {
+            "sub": "user-subject-id",
+            "name": "Test User",
+        }
+
+        token = issuer.issue_refresh_token(
+            client_id="client-abc",
+            scopes=["read"],
+            jti="refresh-token-id",
+            expires_in=60 * 60 * 24 * 30,
+            upstream_claims=upstream_claims,
+        )
+
+        payload = issuer.verify_token(token)
+        assert payload["token_use"] == "refresh"
+        assert "upstream_claims" in payload
+        assert payload["upstream_claims"]["sub"] == "user-subject-id"
+        assert payload["upstream_claims"]["name"] == "Test User"
+
+    def test_upstream_claims_with_empty_dict(self, issuer):
+        """Test that empty upstream_claims dict is not embedded."""
+        token = issuer.issue_access_token(
+            client_id="client-abc",
+            scopes=["read"],
+            jti="token-id-123",
+            expires_in=3600,
+            upstream_claims={},
+        )
+
+        payload = issuer.verify_token(token)
+        # Empty dict should not create the key (falsy check)
+        assert "upstream_claims" not in payload

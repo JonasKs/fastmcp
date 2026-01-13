@@ -807,3 +807,177 @@ class TestOIDCScopeHandling:
         assert "profile" in result
         assert "api://my-api/openid" not in result
         assert "api://my-api/profile" not in result
+
+
+class TestUpstreamClaimsExtraction:
+    """Tests for upstream claims extraction in Azure provider.
+
+    The _extract_upstream_claims hook allows embedding upstream token claims
+    in the FastMCP JWT, enabling gateways to inspect upstream identity without
+    server-side storage lookups.
+    """
+
+    def _create_mock_azure_jwt(self, claims: dict) -> str:
+        """Create a mock Azure JWT for testing.
+
+        This creates a properly formatted JWT with the given claims.
+        The signature is invalid, but that's fine for testing extraction.
+        """
+        import base64
+        import json
+
+        header = {"alg": "RS256", "typ": "JWT"}
+        header_b64 = (
+            base64.urlsafe_b64encode(json.dumps(header).encode()).rstrip(b"=").decode()
+        )
+        payload_b64 = (
+            base64.urlsafe_b64encode(json.dumps(claims).encode()).rstrip(b"=").decode()
+        )
+        signature_b64 = (
+            base64.urlsafe_b64encode(b"fake-signature").rstrip(b"=").decode()
+        )
+
+        return f"{header_b64}.{payload_b64}.{signature_b64}"
+
+    async def test_extract_claims_with_valid_azure_token(self):
+        """Test extracting claims from a valid Azure JWT."""
+        provider = AzureProvider(
+            client_id="test_client",
+            client_secret="test_secret",
+            tenant_id="test-tenant",
+            base_url="https://myserver.com",
+            required_scopes=["read"],
+            jwt_signing_key="test-secret",
+        )
+
+        mock_token = self._create_mock_azure_jwt(
+            {
+                "sub": "user-subject-id",
+                "oid": "user-object-id",
+                "name": "Test User",
+                "preferred_username": "testuser@example.com",
+                "email": "testuser@example.com",
+                "roles": ["Admin", "Reader"],
+                "groups": ["group-id-1", "group-id-2"],
+                "iss": "https://login.microsoftonline.com/tenant/v2.0",
+                "aud": "test_client",
+            }
+        )
+
+        idp_tokens = {"access_token": mock_token}
+        claims = await provider._extract_upstream_claims(idp_tokens)
+
+        assert claims is not None
+        assert claims["sub"] == "user-subject-id"
+        assert claims["oid"] == "user-object-id"
+        assert claims["name"] == "Test User"
+        assert claims["preferred_username"] == "testuser@example.com"
+        assert claims["email"] == "testuser@example.com"
+        assert claims["roles"] == ["Admin", "Reader"]
+        assert claims["groups"] == ["group-id-1", "group-id-2"]
+        # Standard JWT claims like iss and aud should not be extracted
+        assert "iss" not in claims
+        assert "aud" not in claims
+
+    async def test_extract_claims_with_partial_claims(self):
+        """Test extracting claims when only some claims are present."""
+        provider = AzureProvider(
+            client_id="test_client",
+            client_secret="test_secret",
+            tenant_id="test-tenant",
+            base_url="https://myserver.com",
+            required_scopes=["read"],
+            jwt_signing_key="test-secret",
+        )
+
+        mock_token = self._create_mock_azure_jwt(
+            {
+                "sub": "user-subject-id",
+                "name": "Test User",
+                # No oid, preferred_username, email, roles, or groups
+            }
+        )
+
+        idp_tokens = {"access_token": mock_token}
+        claims = await provider._extract_upstream_claims(idp_tokens)
+
+        assert claims is not None
+        assert claims["sub"] == "user-subject-id"
+        assert claims["name"] == "Test User"
+        assert "oid" not in claims
+        assert "email" not in claims
+
+    async def test_extract_claims_with_no_access_token(self):
+        """Test that None is returned when access_token is missing."""
+        provider = AzureProvider(
+            client_id="test_client",
+            client_secret="test_secret",
+            tenant_id="test-tenant",
+            base_url="https://myserver.com",
+            required_scopes=["read"],
+            jwt_signing_key="test-secret",
+        )
+
+        idp_tokens = {"refresh_token": "some-refresh-token"}
+        claims = await provider._extract_upstream_claims(idp_tokens)
+
+        assert claims is None
+
+    async def test_extract_claims_with_invalid_jwt_format(self):
+        """Test that None is returned for invalid JWT format."""
+        provider = AzureProvider(
+            client_id="test_client",
+            client_secret="test_secret",
+            tenant_id="test-tenant",
+            base_url="https://myserver.com",
+            required_scopes=["read"],
+            jwt_signing_key="test-secret",
+        )
+
+        # Not a valid JWT (only 2 parts instead of 3)
+        idp_tokens = {"access_token": "invalid.token"}
+        claims = await provider._extract_upstream_claims(idp_tokens)
+
+        assert claims is None
+
+    async def test_extract_claims_with_empty_claims(self):
+        """Test that None is returned when no extractable claims exist."""
+        provider = AzureProvider(
+            client_id="test_client",
+            client_secret="test_secret",
+            tenant_id="test-tenant",
+            base_url="https://myserver.com",
+            required_scopes=["read"],
+            jwt_signing_key="test-secret",
+        )
+
+        # Token with only standard JWT claims, no user identity claims
+        mock_token = self._create_mock_azure_jwt(
+            {
+                "iss": "https://login.microsoftonline.com/tenant/v2.0",
+                "aud": "test_client",
+                "exp": 1234567890,
+            }
+        )
+
+        idp_tokens = {"access_token": mock_token}
+        claims = await provider._extract_upstream_claims(idp_tokens)
+
+        assert claims is None
+
+    async def test_extract_claims_with_malformed_base64(self):
+        """Test that None is returned for malformed base64 in token."""
+        provider = AzureProvider(
+            client_id="test_client",
+            client_secret="test_secret",
+            tenant_id="test-tenant",
+            base_url="https://myserver.com",
+            required_scopes=["read"],
+            jwt_signing_key="test-secret",
+        )
+
+        # Token with invalid base64 payload
+        idp_tokens = {"access_token": "valid.!!!invalid-base64!!!.signature"}
+        claims = await provider._extract_upstream_claims(idp_tokens)
+
+        assert claims is None

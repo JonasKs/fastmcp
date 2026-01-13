@@ -1284,6 +1284,9 @@ class OAuthProxy(OAuthProvider):
         )
         logger.debug("Stored encrypted upstream tokens (jti=%s)", access_jti[:8])
 
+        # Extract upstream claims to embed in FastMCP JWT (if subclass implements)
+        upstream_claims = await self._extract_upstream_claims(idp_tokens)
+
         # Issue minimal FastMCP access token (just a reference via JTI)
         if client.client_id is None:
             raise TokenError("invalid_client", "Client ID is required")
@@ -1292,6 +1295,7 @@ class OAuthProxy(OAuthProvider):
             scopes=authorization_code.scopes,
             jti=access_jti,
             expires_in=expires_in,
+            upstream_claims=upstream_claims,
         )
 
         # Issue minimal FastMCP refresh token if upstream provided one
@@ -1303,6 +1307,7 @@ class OAuthProxy(OAuthProvider):
                 scopes=authorization_code.scopes,
                 jti=refresh_jti,
                 expires_in=refresh_expires_in,
+                upstream_claims=upstream_claims,
             )
 
         # Store JTI mappings
@@ -1375,6 +1380,32 @@ class OAuthProxy(OAuthProvider):
             Scopes to send to upstream provider (may be transformed/augmented)
         """
         return scopes
+
+    async def _extract_upstream_claims(
+        self, idp_tokens: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """Extract upstream claims to embed in FastMCP JWT.
+
+        Override this method to decode upstream tokens, call userinfo endpoints,
+        or otherwise extract claims that should be embedded in the FastMCP JWT
+        issued to MCP clients. This enables gateways to inspect upstream identity
+        information by decoding the JWT without server-side storage lookups.
+
+        Args:
+            idp_tokens: Full token response from upstream provider. Contains
+                access_token, and for OIDC providers may include id_token,
+                refresh_token, and other response fields.
+
+        Returns:
+            Dict of claims to embed in JWT under the "upstream_claims" key,
+            or None to not embed any upstream claims.
+
+        Example:
+            For Azure/Entra ID, you might decode the access_token JWT and
+            extract claims like sub, oid, name, preferred_username, email,
+            roles, and groups.
+        """
+        return None
 
     async def load_refresh_token(
         self,
@@ -1542,6 +1573,11 @@ class OAuthProxy(OAuthProvider):
             ),  # Keep until longest-lived token expires (min 1s for safety)
         )
 
+        # Re-extract upstream claims from refreshed token response
+        upstream_claims = await self._extract_upstream_claims(
+            upstream_token_set.raw_token_data
+        )
+
         # Issue new minimal FastMCP access token (just a reference via JTI)
         if client.client_id is None:
             raise TokenError("invalid_client", "Client ID is required")
@@ -1551,6 +1587,7 @@ class OAuthProxy(OAuthProvider):
             scopes=scopes,
             jti=new_access_jti,
             expires_in=new_expires_in,
+            upstream_claims=upstream_claims,
         )
 
         # Store new access token JTI mapping
@@ -1573,6 +1610,7 @@ class OAuthProxy(OAuthProvider):
             jti=new_refresh_jti,
             expires_in=new_refresh_expires_in
             or 60 * 60 * 24 * 30,  # Fallback to 30 days
+            upstream_claims=upstream_claims,
         )
 
         # Store new refresh token JTI mapping with aligned expiry
